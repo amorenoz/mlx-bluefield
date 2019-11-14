@@ -1,0 +1,44 @@
+From 68336c9561e09b384be7601866932ce0cce896e0 Mon Sep 17 00:00:00 2001
+From: Adrian Moreno <amorenoz@redhat.com>
+Date: Thu, 14 Nov 2019 13:33:13 +0100
+Subject: [PATCH 2/2] mlx5: fix debug compilation
+
+Disable pedantic mode as there are some compilation errors.
+Also, disable the assertion on MLX_SET64. It will stop the driver from
+working because it is bein used incorrectly to set a 24bit field in
+mlx5_devx_cmd_create_vritq() line 858.
+
+Signed-off-by: Adrian Moreno <amorenoz@redhat.com>
+---
+ drivers/net/mlx5/Makefile   | 2 +-
+ drivers/net/mlx5/mlx5_prm.h | 1 -
+ 2 files changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/drivers/net/mlx5/Makefile b/drivers/net/mlx5/Makefile
+index c191647..7ef63d4 100644
+--- a/drivers/net/mlx5/Makefile
++++ b/drivers/net/mlx5/Makefile
+@@ -84,7 +84,7 @@ endif
+ 
+ # User-defined CFLAGS.
+ ifeq ($(CONFIG_RTE_LIBRTE_MLX5_DEBUG),y)
+-CFLAGS += -pedantic -UNDEBUG -DPEDANTIC
++CFLAGS += -UNDEBUG -UPEDANTIC
+ else
+ CFLAGS += -DNDEBUG -UPEDANTIC
+ endif
+diff --git a/drivers/net/mlx5/mlx5_prm.h b/drivers/net/mlx5/mlx5_prm.h
+index 5db3843..92db65e 100644
+--- a/drivers/net/mlx5/mlx5_prm.h
++++ b/drivers/net/mlx5/mlx5_prm.h
+@@ -530,7 +530,6 @@ typedef uint8_t u8;
+ 
+ #define MLX5_SET64(typ, p, fld, v) \
+ 	do { \
+-		assert(__mlx5_bit_sz(typ, fld) == 64); \
+ 		*((__be64 *)(p) + __mlx5_64_off(typ, fld)) = \
+ 			rte_cpu_to_be_64(v); \
+ 	} while (0)
+-- 
+2.21.0
+

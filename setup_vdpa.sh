@@ -1,0 +1,166 @@
+#!/bin/bash
+set -e
+
+NUM_VFS=8
+PF=enp66s0f0
+
+MLX_MGT_MAC=00:1a:ca:ff:ff:02
+
+error() {
+	echo $@
+	exit 1
+}
+
+add_udev_rule (){
+	cat >/etc/udev/rules.d/91-tmfifo_net.rules <<EOF
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="00:1a:ca:ff:ff:02", ATTR{type}=="1", NAME="tmfifo_net0"
+EOF
+	chmod +x /etc/udev/rules.d/91-tmfifo_net.rules
+        udevadm control --reload-rules
+}
+
+nic_conf () {
+	add_udev_rule
+        modinfo rshim-net
+        if [ $? != 0 ]; then
+		echo "Build and install mellanox rshim drivers first"
+		exit 1
+	fi
+        # Reload the driver to ensure the interface get's renamed
+	modprobe -r rshim-net || true
+	modprobe -r rshim || true
+	modprobe -r rshim-pcie || true
+	modprobe -v rshim
+	modprobe -v rshim-net
+	modprobe -v rshim-pcie
+	sleep 5
+	ip link set tmfifo_net0 up
+	nmcli device set tmfifo_net0 managed no
+	# The internal IP address is hardcoded to 192.168.100.2
+	ip addr add 192.168.100.1/30 dev tmfifo_net0
+}
+
+run_in_nic () {
+	local cmd=$@
+	#echo "Running command ${cmd}"
+	local out=$(eval ssh root@192.168.100.2 -o StrictHostKeyChecking=no $cmd 2>&1)
+	local ret=$?
+	if [ $ret != 0 ]; then
+		echo "Command failed returned ${ret}"
+		echo "stout: $out"
+	fi
+	#echo "${out}"
+}
+
+get_hardcoded_vlan() {
+	local vfid=$1
+	let vlan_id=100+10*${vfid}
+	echo ${vlan_id}
+}
+get_hardcoded_ips() {
+	local vfid=$1
+	let ip=2+${vfid}
+	echo 172.1.${ip}.1/30
+}
+
+get_pci_addr() {
+	pf=$1
+	vf=$2
+	if [ -z $vf ]; then
+		echo $(basename $(readlink /sys/class/net/${pf}/device)) else
+		echo $(basename $(readlink /sys/class/net/${pf}/device/virtfn${vf}))
+	fi
+}
+
+get_iface() {
+	pf=$1
+	vf=$2
+	echo $(ls -x /sys/class/net/${pf}/device/virtfn${vf}/net)
+}
+
+get_mac_addr() {
+	pf=$1
+	vf=$2
+	if [ -z $vf ]; then
+		echo $(cat /sys/class/net/${pf}/device/net/*/address)
+	else
+		echo $(cat /sys/class/net/${pf}/device/virtfn${vf}/net/*/address)
+	fi
+}
+
+
+echo 0 > /sys/class/net/${PF}/device/sriov_numvfs
+echo ${NUM_VFS} > /sys/class/net/${PF}/device/sriov_numvfs
+
+echo "Configuring NIC management interface"
+nic_conf
+
+vfMacs=()
+
+for i in ${!allThreads[@]}; do
+	  ./pipeline --threads ${allThreads[$i]}
+  done
+echo "Unbinding VFs"
+for i in $(seq 0 $(($NUM_VFS -1))); do
+	mac=$(get_mac_addr ${PF} ${i})
+        echo "mac = $mac"
+	vfMacs+=($mac)
+        echo "vfMacs= $vfMacs"
+	pci_addr=$(get_pci_addr ${PF} $i)
+	echo "	Unbinding VF ${i} with PCI address $pci_addr"
+	echo $pci_addr >  /sys/bus/pci/drivers/mlx5_core/unbind
+done
+
+echo "Adding MAC addresses in embedded nic"
+for i in ${!vfMacs[@]}; do
+	run_in_nic "echo ${vfMacs[$i]} ' > ' /sys/class/net/p0/smart_nic/vf${i}/mac" 
+	run_in_nic "cat  /sys/class/net/p0/smart_nic/vf${i}/config" 
+done
+
+echo "Unbinding VFs"
+for i in $(seq 0 $(($NUM_VFS -1))); do
+	pci_addr=$(get_pci_addr ${PF} $i)
+	echo "	Binding VF ${i} with PCI address $pci_addr"
+	echo $pci_addr >  /sys/bus/pci/drivers/mlx5_core/bind
+done
+
+mst start
+mcra /dev/mst/mt41682_pciconf0 0x3c64.18 1
+mcra /dev/mst/mt41682_pciconf0 0x3ce4.7:1 1
+
+nmcli device set ${PF} managed no
+ip addr flush  dev ${PF}
+ip addr add 172.10.10.1/32 dev ${PF}
+for i in $(seq 0 $(($NUM_VFS -1))); do
+	devname=$(get_iface $PF $i)
+	nmcli device set ${devname} managed no
+	ip_addr=$(get_hardcoded_ips $i)
+	echo "Configuring device ${devname} with IP address ${ip_addr}"
+	ip addr add $ip_addr dev $devname
+done
+
+echo "Setting flow sterring rules"
+run_in_nic "tc qdisc add dev p0 ingress"
+run_in_nic "tc filter del dev p0 ingress"
+run_in_nic "systemctl stop openvswitch"
+
+for i in $(seq 0 $((${NUM_VFS} -1))); do
+	run_in_nic "tc qdisc del dev pf0vf${i} ingress"
+	run_in_nic "tc qdisc add dev pf0vf${i} ingress"
+	vlan_id=$(get_hardcoded_vlan ${i})
+	echo "   VF $i  VLAN $vlan_id"
+	run_in_nic "tc filter add dev pf0vf${i} parent ffff: \
+		flower \
+		skip_sw \
+		action vlan push id ${vlan_id} \
+		action mirred egress redirect dev p0"
+
+	run_in_nic "tc filter add dev p0 protocol 802.1Q parent ffff: \
+		flower \
+		skip_sw \
+		vlan_id ${vlan_id} \
+		vlan_prio 0 \
+		action vlan pop \
+		action mirred egress redirect dev pf0vf${i}"
+done
+
