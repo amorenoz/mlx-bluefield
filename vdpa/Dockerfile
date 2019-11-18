@@ -27,7 +27,7 @@ RUN patch -p1 < 0001-vdpa_hack-revert-configure-vdpa-device-on-vring-call.patch
 RUN patch -p1 < 0002-mlx5-fix-debug-compilation.patch
 
 ENV RTE_TARGET=x86_64-native-linuxapp-gcc
-ENV RTE_SDK=${DPDK_DIR}/
+ENV RTE_SDK=${DPDK_DIR}
 # DPDK_VER 19.08
 RUN sed -i -e 's/EAL_IGB_UIO=y/EAL_IGB_UIO=n/' config/common_linux
 RUN sed -i -e 's/KNI_KMOD=y/KNI_KMOD=n/' config/common_linux

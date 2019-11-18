@@ -67,7 +67,8 @@ get_pci_addr() {
 	pf=$1
 	vf=$2
 	if [ -z $vf ]; then
-		echo $(basename $(readlink /sys/class/net/${pf}/device)) else
+		echo $(basename $(readlink /sys/class/net/${pf}/device))
+	else
 		echo $(basename $(readlink /sys/class/net/${pf}/device/virtfn${vf}))
 	fi
 }
